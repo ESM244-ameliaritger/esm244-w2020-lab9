@@ -1,0 +1,176 @@
+---
+title: "Lab 9"
+author: "Amelia Ritger"
+date: "3/5/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      warning = FALSE,
+                      message = FALSE)
+
+library(tidyverse)
+library(here)
+library(boot)
+library(gt)
+library(patchwork)
+library(broom)
+library(nlstools)
+```
+
+### Make fun tables with `gt`
+
+(see ?LifeCycleSavings for more)
+```{r}
+disp_income <- LifeCycleSavings %>% 
+  rownames_to_column() %>% #make row names an actual column
+  arrange(dpi) %>% #arrange columns from lowest to highest dpi
+  head(5) %>% 
+  mutate(ddpi = ddpi/100,
+         pop15 = pop15/100,
+         pop75 = pop75/100) #convert percentages to decimal values
+```
+
+Now let's make a nicer table than `kableExtra` with `gt`
+```{r}
+disp_income %>% 
+  gt() %>% #note how `gt` automatically recognizes column called rowname and says "hey, that's a group identifier!"
+  tab_header(
+    title = "Life cycle savings",
+    subtitle = "5 countries with the lowest per capita disposable income"
+  ) %>% 
+  fmt_currency( 
+    columns = vars(dpi),
+    decimals=2 
+  ) %>% #change formatting to currency $$ !
+  fmt_percent(
+    columns = vars(pop15, pop75, ddpi),
+    decimals=1
+  ) %>% #change formatting to percents % !
+  tab_options(table.width = pct(80)) %>% #make the table width 80% of the page width
+  tab_footnote(
+    footnote = "Data averaged from 1970-1980",
+    location = cells_title()
+  ) %>% #add footnote linked to table title
+  data_color(
+    columns = vars(dpi),
+    colors = scales::col_numeric(
+      palette = c("orange", "purple", "green"),
+      domain = c(130, 190) #specify domain to tell it what values to associate color (here, values of dpi from 130-190)
+    )
+  ) %>% #color the cells in the table and specify which exact cells get color
+  cols_label(
+    sr = "Savings ratio"
+  ) #rename column names 
+  
+  
+```
+
+### Bootstrap the confidence interval for salinity
+```{r}
+View(salinity)
+
+# Get some summary statistics from the single salinity sample:
+hist(salinity$sal)
+mean(salinity$sal)
+
+#I believe based on a single sample of n=28 that a t-distribution describes the sampling distribution. So I'll use:
+t.test(salinity$sal) # Get 95% CI for t-distribution
+
+#But I really want to compare this by using bootstrapping to find a smapling distributions based on my data, instead of based entirely on assumptions. 
+```
+
+Create a function to calculate the mean of different bootstrap samples:
+```{r}
+mean_fun <- function(x,i) {mean(x[i])}
+
+sal_nc <- salinity$sal
+
+set.seed(5002) #reproducibly randomize
+salboot_100 <- boot(data=sal_nc,
+                    statistic=mean_fun,
+                    R=100)
+
+salboot_100k <- boot(data=sal_nc,
+                    statistic=mean_fun,
+                    R=100000) #in class we did 10,000 but b/c I'm feeling extra...
+
+salboot_100 #bias = how much bootstrap sampling distribution mean is different from original sample mean, std error = based on sampling distribution
+salboot_100_df <- data.frame(bs_mean = salboot_100$t) #t shows you the mean values calculated for the 100 bootstrapped samples
+salboot_100k_df <- data.frame(bs_mean = salboot_100k$t)
+
+# Now let's plot the bootstrapped sampling distribution:
+p1 <- ggplot(data = salinity, aes(x=sal)) +
+  geom_histogram()
+p2 <- ggplot(data = salboot_100_df, aes(x=bs_mean)) +
+  geom_histogram()
+p3 <- ggplot(data = salboot_100k_df, aes(x=bs_mean)) +
+  geom_histogram()
+
+#Using `patchwork`, arrange plots!
+p1 + p2 + p3 # horizontally in a row
+#different than facet wrap because facet wrap splits up plots based on variable levels
+
+(p1 + p2) / p3 # horizontally and vertically
+```
+
+```{r}
+boot.ci(salboot_100k, conf = 0.95) #Normal = normality, percentile = 2.5% and 97.5%, BCa = biased corrected with acceleration, improves estimates associated with samples with strong skew...
+
+# Check out additional_bootstrap_nls to see examples of nonlinear least squares bootstrapping!
+```
+
+### Example of nonlinear least squares
+```{r}
+df <- read_csv(here("data", "log_growth.csv"))
+
+#logistic growth curve
+ggplot(data=df, aes(x=time, y=pop)) +
+  geom_point()
+
+#check out the linear component (slope) for exponential phase
+ggplot(data=df, aes(x=time, y=log(pop))) +
+  geom_point()
+```
+
+```{r}
+df_exp <- df %>% 
+  filter(time < 15) %>% 
+  mutate(ln_pop = log(pop))
+
+#get slope
+lm_k <- lm(ln_pop ~ time, data = df_exp)
+# R estimate for growth rate = 0.17
+# our estimate for K (carrying capacity) = 180
+# our estimate for A (K - initial population size/initial population size) = 18
+```
+
+Now NLS:
+```{r}
+df_nls <- nls(pop ~ K/(1 + A*exp(-r * time)), #pop here is the same df_exp$pop, time here is the same df_exp$time
+              data = df,
+              start = list(K = 180, A = 18, r=0.17),
+              trace=TRUE)  #shows the work! left column is the sum of the squares of the residuals (which nls is trying to minimize)
+
+summary(df_nls)
+model_out <- broom::tidy(df_nls) #call model outputs
+```
+
+```{r}
+t_seq <- seq(from = 0, to = 35, length = 200) #create sequence of 200 values equally spaced ranging from 0-35
+
+#Now make predictions from our NLS model, using that new sequence of times:
+p_predict <- predict(df_nls, newdata = t_seq)
+#Bind together time and prediction data:
+df_complete <- data.frame(df, p_predict)
+
+ggplot(data=df_complete, aes(x=time, y=pop)) +
+  geom_point() +
+  geom_line(aes(x=time, y=p_predict)) +
+  theme_minimal()
+```
+
+```{r}
+fd_ci <- confint2(df_nls) #you can also bootstrap these! check out the key if you want to know more...
+```
